@@ -22,11 +22,10 @@
         
         // Importy Firebase modulů z CDN
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js';
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js';
         import { getFirestore, collection, onSnapshot, doc, setDoc, getDoc } from 'https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js';
         
         // --- NÁHRADA ZA LUCIDE-REACT ---
-        // Použití FontAwesome ikon řeší problém se závislostmi modulů prohlížeče
         const Monitor = ({ size = 24, color, style }) => <i className="fa-solid fa-desktop" style={{ fontSize: size, color, ...style }}></i>;
         const Database = ({ size = 24, color, className }) => <i className={`fa-solid fa-database ${className || ''}`} style={{ fontSize: size, color }}></i>;
         const Check = ({ size = 24, color }) => <i className="fa-solid fa-check" style={{ fontSize: size, color }}></i>;
@@ -38,13 +37,26 @@
         const Clock = ({ size = 24, color }) => <i className="fa-solid fa-clock" style={{ fontSize: size, color }}></i>;
         const Mail = ({ size = 24, color }) => <i className="fa-solid fa-envelope" style={{ fontSize: size, color }}></i>;
 
-        // --- FIREBASE INITIALIZATION (VOLITELNÉ PRO GITHUB PAGES) ---
-        // Pokud chcete na GitHub Pages funkční Leaderboard, musíte sem vložit údaje z vaší Firebase konzole.
-        // Hra ale bude plně fungovat i bez toho, jen se nebude ukládat globální skóre.
-        const firebaseConfig = {}; 
+        // --- FIREBASE INITIALIZATION ---
+        let firebaseConfig = {};
+        if (typeof __firebase_config !== 'undefined') {
+            // Automatické načtení v lokálním náhledu Canvas
+            firebaseConfig = JSON.parse(__firebase_config);
+        } else {
+            // PRO GITHUB PAGES: Abyste zprovoznili žebříček globálně, 
+            // vytvořte si zdarma projekt na console.firebase.google.com a vložte sem parametry:
+            firebaseConfig = {
+                apiKey: "AIzaSyD7pCxtTVUNJm4L66GsH7Z8UEjF09vx8bs",
+                authDomain: "pcbuilder98-d4b54.firebaseapp.com",
+                projectId: "pcbuilder98-d4b54",
+                storageBucket: "pcbuilder98-d4b54.firebasestorage.app",
+                messagingSenderId: "889279535991",
+                appId: "1:889279535991:web:2284e7b1ac36453fb91f72"
+            };
+        }
         
         let app, auth, db;
-        if (Object.keys(firebaseConfig).length > 0) {
+        if (firebaseConfig && firebaseConfig.apiKey) {
             try {
                 app = initializeApp(firebaseConfig);
                 auth = getAuth(app);
@@ -53,7 +65,7 @@
                 console.warn("Chyba při inicializaci Firebase:", e);
             }
         }
-        const appId = 'pc-builder-98-standalone';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'pc-builder-98-standalone';
 
         // --- COMPONENT DATABASE ---
         const componentsDB = {
@@ -193,7 +205,7 @@
         const evaluateLocally = (cart, level, price) => {
             let functional = true;
             let score = 100;
-            let feedback = "[LOKÁLNÍ HODNOCENÍ - Offline Režim]\n\n";
+            let feedback = "[LOKÁLNÍ ZÁLOŽNÍ HODNOCENÍ - Offline Režim]\n\n";
 
             const required = ['CPU', 'MB', 'RAM', 'Storage', 'PSU', 'Case'];
             const missing = required.filter(cat => !cart[cat]);
@@ -237,10 +249,77 @@
             return { functional, score, feedback };
         };
 
-        // --- API CALLER (Na Github Pages záměrně selže a použije Offline Režim) ---
+        // --- GEMINI API CALLER ---
         const callGeminiWithBackoff = async (cart, level, totalPrice) => {
-            // Protože na GitHub Pages není proxy poskytující klíč, spustí se automaticky náš spolehlivý lokální fallback
-            return evaluateLocally(cart, level, totalPrice);
+            const apiKey = "AIzaSyCwO-d8qPkbAHx5W7lyqsE9YcX7bzWRESA"; // NA GITHUB PAGES: Pokud chcete AI hodnocení, vložte sem svůj klíč z Google AI Studio (aistudio.google.com). Zde v Canvasu nechte prázdné.
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            const delays = [1000, 2000, 4000];
+
+            const fullPrompt = `Jsi přísný AI expert na stavění PC. Hráč právě sestavil počítač ve hře. Zhodnoť tuto sestavu podle požadavků zákazníka a technické funkčnosti. Odpovídej POUZE platným JSON objektem.
+
+            Požadavky zákazníka:
+            ${level.text}
+            Cenový limit: ${level.budget ? level.budget + ' Kč' : 'Bez limitu'}
+
+            Zvolené komponenty:
+            ${JSON.stringify(cart, null, 2)}
+            Celková cena sestavy: ${totalPrice} Kč
+
+            Pravidla funkčnosti (Kritické chyby - pokud něco nesedí, functional=false):
+            1. Musí mít přesně 1x CPU, 1x MB, 1x RAM, 1x Úložiště (Storage), 1x Zdroj (PSU), 1x Skříň (Case). Pokud něco z tohoto chybí, sestava je nefunkční. (Monitor a GPU mohou chybět dle dalších pravidel).
+            2. Socket CPU a MB se musí přesně shodovat (např. obojí AM4, nebo obojí LGA1700). Jinak procesor nezapadne do desky.
+            3. Typ RAM (DDR4/DDR5) v RAM a podpora pamětí na MB se musí přesně shodovat.
+            4. Pokud vybraný CPU má vlastnost "igpu: false" a sestava neobsahuje žádnou dedikovanou GPU, sestava nezobrazí obraz, a proto functional=false.
+
+            Bodování (pokud je functional=true):
+            - Začni na 100 bodech.
+            - Strhni 20 bodů za nedodržení rozpočtu.
+            - Strhni 20 bodů, pokud byl v požadavcích vyžadován monitor a chybí.
+            - Strhni 20 bodů, pokud byl výslovně vyžadován určitý výrobce procesoru (Intel/AMD) a nebyl dodržen.
+            - Strhni 15 bodů za zásadní nevyváženost výkonu.
+            - Strhni 15 bodů za slabý zdroj (např. 400W pro RTX 4070 SUPER je nesmysl, sestava by spadla).
+
+            Odpověz POUZE v tomto čistém JSON formátu (bez markdown značek \`\`\`json apod.):
+            {
+              "functional": true/false,
+              "score": číslo 0-100,
+              "feedback": "Váš text hodnocení v češtině, vysvětlující proč sestava nefunguje (pokud false), nebo důvod srážky bodů."
+            }`;
+
+            for (let i = 0; i <= delays.length; i++) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: fullPrompt }] }],
+                            generationConfig: { 
+                                responseMimeType: "application/json",
+                                responseSchema: {
+                                    type: "OBJECT",
+                                    properties: {
+                                        functional: { type: "BOOLEAN" },
+                                        score: { type: "INTEGER" },
+                                        feedback: { type: "STRING" }
+                                    },
+                                    required: ["functional", "score", "feedback"]
+                                }
+                            }
+                        })
+                    });
+                    if (!response.ok) throw new Error(`API Error ${response.status}`);
+                    const data = await response.json();
+                    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if(!text) throw new Error("Empty response");
+                    return JSON.parse(text);
+                } catch (error) {
+                    // Jakmile to vyhodí chybu sítě/400 (např. chybějící API klíč na Github pages), přesměrujeme to na lokální.
+                    if (i === delays.length - 1) {
+                        return evaluateLocally(cart, level, totalPrice);
+                    }
+                    await new Promise(res => setTimeout(res, delays[i]));
+                }
+            }
         }
 
         // --- MAIN APP COMPONENT ---
@@ -260,7 +339,18 @@
 
             useEffect(() => {
                 if (auth) {
-                    signInAnonymously(auth).catch(e => console.warn("Nelze se přihlásit anonymně:", e));
+                    const initAuth = async () => {
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (e) {
+                            console.warn("Nelze se přihlásit:", e);
+                        }
+                    };
+                    initAuth();
                     const unsubscribe = onAuthStateChanged(auth, setUser);
                     return () => unsubscribe();
                 } else {
@@ -498,7 +588,7 @@
                                 </div>
                             </div>
                             <div className="status-bar">
-                                <span>Připraveno (Offline AI Modul Aktivní)</span>
+                                <span>Připraveno</span>
                                 <span>Uživatel: {playerName}</span>
                             </div>
                         </div>
@@ -516,7 +606,7 @@
                             <div className="window-body text-center py-8">
                                 <Database className="animate-pulse mx-auto mb-4" size={48} />
                                 <p className="font-bold mb-2">Kompiluji ovladače a kontroluji kompatibilitu...</p>
-                                <p className="text-sm">Lokální algoritmus analyzuje funkčnost sestavy.</p>
+                                <p className="text-sm">Umělá inteligence / Systém analyzuje funkčnost sestavy.</p>
                                 <div className="inset h-6 mt-4 p-0">
                                     <div className="h-full bg-blue-800" style={{width: '60%', animation: 'loading 2s infinite'}}></div>
                                 </div>
@@ -578,7 +668,7 @@
                     <div className="win98-app">
                         {renderWin98Styles()}
                         <div className="crt-overlay"></div>
-                        <div className="window" style={{maxWidth: '500px'}}>
+                        <div className="window" style={{maxWidth: '600px'}}>
                             <div className="title-bar">
                                 <span>Síň slávy (Leaderboard)</span>
                                 <button className="btn" style={{padding: '0 4px', height: '18px'}} onClick={() => setScreen('menu')}>X</button>
@@ -607,7 +697,7 @@
                                                     ))
                                                 )
                                             ) : (
-                                                <tr><td colSpan="3" className="p-4 text-center text-red-500 font-bold">Žebříček je offline. Nebyla nalezena konfigurace Firebase.</td></tr>
+                                                <tr><td colSpan="3" className="p-4 text-center text-red-600 font-bold">Zde mimo bezpečný náhled potřebuje žebříček vaši vlastní databázi. Pokyny vizte v kódu (řádky 30 a 240).</td></tr>
                                             )}
                                         </tbody>
                                     </table>
